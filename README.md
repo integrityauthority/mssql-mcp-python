@@ -46,6 +46,12 @@ MSSQL_QUERY_TIMEOUT=60 READ_ONLY=true python -m mssql_mcp.cli --log-level DEBUG
 # Or with HTTP transport
 python -m mssql_mcp.cli --transport http --bind 0.0.0.0:8080
 
+# Using Docker Compose (recommended)
+cp .env.example .env
+# Edit .env with your connection string
+docker compose up -d
+
+
 # Build and run
 docker build -t mssql-mcp:latest .
 docker run -e MSSQL_CONNECTION_STRING="..." mssql-mcp:latest
@@ -187,6 +193,14 @@ ENABLE_WRITES=true ADMIN_CONFIRM=secret python -m mssql_mcp.cli
 ```bash
 MSSQL_QUERY_TIMEOUT=120 python -m mssql_mcp.cli
 ```
+
+### Allow External Access (DNS Rebinding Protection)
+By default, the server only accepts requests from `localhost` and `127.0.0.1`. To allow access from an external hostname:
+```bash
+ALLOWED_HOST=pdapp2.inhat.hu python -m mssql_mcp.cli --transport http --bind 0.0.0.0:8080
+```
+This adds the hostname to the allowed hosts and CORS origins list.
+
 
 ### Run Multiple Instances
 ```bash

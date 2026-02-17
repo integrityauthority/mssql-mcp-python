@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     HTTP_BIND_HOST: str = "127.0.0.1"
     HTTP_BIND_PORT: int = 8080
 
+    # DNS Rebinding Protection
+    ALLOWED_HOST: Optional[str] = None  # e.g., "pdapp2.inhat.hu" for external access
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # 'json' or 'text'

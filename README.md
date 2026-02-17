@@ -197,7 +197,7 @@ MSSQL_QUERY_TIMEOUT=120 python -m mssql_mcp.cli
 ### Allow External Access (DNS Rebinding Protection)
 By default, the server only accepts requests from `localhost` and `127.0.0.1`. To allow access from an external hostname:
 ```bash
-ALLOWED_HOST=pdapp2.inhat.hu python -m mssql_mcp.cli --transport http --bind 0.0.0.0:8080
+ALLOWED_HOST=pdapp2 python -m mssql_mcp.cli --transport http --bind 0.0.0.0:8080
 ```
 This adds the hostname to the allowed hosts and CORS origins list.
 

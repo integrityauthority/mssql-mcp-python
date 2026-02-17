@@ -1,6 +1,7 @@
 services:
   mssql-mcp:
     build: .
+    image: mssql-mcp
     container_name: mssql-mcp-server
     ports:
       - "8006:8080"

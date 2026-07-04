@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mssql-mcp": {
+      "type": "http",
+      "url": "http://pdapp2.inhat.hu:8006/mcp"
+    }
+  }
+}

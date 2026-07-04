@@ -75,11 +75,15 @@ curl http://localhost:8080/metrics
 ## Available MCP Tools
 The server exposes these tools to MCP clients:
 
-### 1. `execute_sql(sql, format="table")`
-Execute SELECT queries (or write operations if enabled)
+### 1. `execute_sql(sql, format="table", timeout=None, max_rows=None)`
+Execute SELECT queries (or write operations if enabled).
+- `format`: `"table"`, `"json"` or `"csv"`.
+- `timeout`: per-query timeout (seconds), overrides `MSSQL_QUERY_TIMEOUT` for slow queries.
+- `max_rows`: per-query row cap, overrides `MAX_ROWS_PER_QUERY`.
 ```
-Input: "SELECT * FROM users LIMIT 10"
-Output: ASCII table or JSON
+Input: "SELECT TOP 10 * FROM users", format="json"
+Output: JSON rows + summary; truncation is flagged explicitly.
+        Write statements return the affected-row count.
 ```
 
 ### 2. `list_schemas()`
@@ -103,21 +107,28 @@ Input: schema="dbo"
 Output: JSON with detailed column info
 ```
 
-### 5. `get_database_info()`
+### 5. `describe_table(table)`
+Describe a single table: columns, types, nullability, primary keys, descriptions
+```
+Input: table="dbo.users"  (schema prefix optional)
+Output: JSON column metadata for that one table
+```
+
+### 6. `get_database_info()`
 Get server/database metadata
 ```
 Input: (none)
 Output: Database name, version, machine name
 ```
 
-### 6. `get_policy_info()`
+### 7. `get_policy_info()`
 Get current security policy settings
 ```
 Input: (none)
 Output: Policy details (allowed operations, limits)
 ```
 
-### 7. `check_db_connection()`
+### 8. `check_db_connection()`
 Health check for database connectivity
 ```
 Input: (none)
@@ -188,6 +199,25 @@ LOG_LEVEL=DEBUG python -m mssql_mcp.cli
 ```bash
 ENABLE_WRITES=true ADMIN_CONFIRM=secret python -m mssql_mcp.cli
 ```
+> The app-level `ENABLE_WRITES` switch is only the first line of defense. The
+> ultimate authority is the permissions of the SQL login you connect as — see
+> credential override below.
+
+### Use a Specific SQL Login (credential override)
+Each deployment can run under its own SQL login without editing the base
+connection string. `MSSQL_USER` / `MSSQL_PASSWORD` take precedence over any
+`UID`/`PWD` embedded in `MSSQL_CONNECTION_STRING`:
+```bash
+# Base string holds only driver/server/database; identity comes from these:
+MSSQL_USER=reporting_ro MSSQL_PASSWORD=secret python -m mssql_mcp.cli
+```
+- `MSSQL_USER`, `MSSQL_PASSWORD` — override the SQL credentials (ideal for secrets).
+- `MSSQL_TRUSTED_CONNECTION=true` — use Windows/Integrated auth instead (ignores user/password).
+
+Because the connected login's own permissions govern access, connecting with a
+read-only login enforces read-only **at the database level**, regardless of
+`ENABLE_WRITES`. Conversely, allowing writes requires both `ENABLE_WRITES=true`
+and a login that has write permission.
 
 ### Increase Query Timeout
 ```bash
@@ -201,6 +231,16 @@ ALLOWED_HOST=your-host python -m mssql_mcp.cli --transport http --bind 0.0.0.0:8
 ```
 This adds the hostname to the allowed hosts and CORS origins list.
 
+### Fix Garbled Non-ASCII Characters (accents, etc.)
+Results are decoded using explicit encodings. The defaults work for most SQL Server
+setups (NVARCHAR is UTF-16LE, VARCHAR is read as UTF-8). If `VARCHAR` columns use a
+legacy code-page collation, override the narrow encoding:
+```bash
+# e.g. Central-European legacy VARCHAR data
+MSSQL_ENCODING=cp1250 python -m mssql_mcp.cli
+```
+- `MSSQL_ENCODING` (default `utf-8`) — decoding of narrow `SQL_CHAR`/`VARCHAR` columns
+- `MSSQL_WIDE_ENCODING` (default `utf-16-le`) — wide `SQL_WCHAR`/`NVARCHAR` decoding **and** the query/parameter send encoding (SQL Server expects UTF-16LE; sending UTF-8 corrupts accented literals in queries)
 
 ### Run Multiple Instances
 ```bash

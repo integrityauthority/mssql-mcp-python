@@ -243,6 +243,13 @@ Headers (all optional): `X-MSSQL-User`, `X-MSSQL-Password`,
 credentials are used. Precedence: request headers → server `MSSQL_USER`/… →
 `UID`/`PWD` in `MSSQL_CONNECTION_STRING`.
 
+**Non-ASCII values:** HTTP header values must be Latin-1, so a value containing
+non-ASCII characters (e.g. an accented password) can't be sent raw. For those,
+send the base64 of the UTF-8 value in the `-B64` variant of the header, which
+takes precedence over the plain one:
+`X-MSSQL-User-B64`, `X-MSSQL-Password-B64`. Example (encode the value):
+`printf '%s' 'pÁsswŐrd' | base64`.
+
 > Security: credentials travel in headers, so use HTTPS (or a trusted network).
 > Access is still bounded by that login's own SQL Server permissions.
 

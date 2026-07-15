@@ -5,6 +5,7 @@ Implements @mcp.tool() decorated functions that are exposed to MCP clients.
 Each tool validates input, applies policies, executes DB queries, and returns results.
 """
 
+import base64
 import logging
 import time
 from typing import Optional, Any
@@ -26,9 +27,31 @@ logger = logging.getLogger(__name__)
 # as its own SQL login for the duration of a request, overriding the server's
 # default credentials. Passwords travel in headers, so use HTTPS / a trusted
 # network in production.
+#
+# HTTP header values must be Latin-1 (bytes 0-255), so a value with non-ASCII
+# characters (e.g. accented passwords) cannot be sent raw — many clients refuse
+# to. For those, send the base64 of the UTF-8 value in the "<header>-B64" variant
+# instead; it takes precedence over the plain header.
 _HDR_USER = "X-MSSQL-User"
 _HDR_PASSWORD = "X-MSSQL-Password"
 _HDR_TRUSTED = "X-MSSQL-Trusted-Connection"
+_B64_SUFFIX = "-B64"
+
+
+def _header_value(headers, name: str) -> Optional[str]:
+    """Return a header's value, preferring its base64 variant (<name>-B64).
+
+    The base64 form lets clients pass values containing non-Latin-1 characters,
+    which raw HTTP headers cannot carry.
+    """
+    b64 = headers.get(name + _B64_SUFFIX)
+    if b64:
+        try:
+            return base64.b64decode(b64).decode("utf-8")
+        except Exception:
+            logger.warning("Ignoring malformed base64 header: %s", name + _B64_SUFFIX)
+            return None
+    return headers.get(name)
 
 
 def _creds_from_ctx(ctx: Optional[Context]) -> dict:
@@ -48,9 +71,9 @@ def _creds_from_ctx(ctx: Optional[Context]) -> dict:
         return {}
 
     creds: dict = {}
-    user = headers.get(_HDR_USER)
-    password = headers.get(_HDR_PASSWORD)
-    trusted_raw = headers.get(_HDR_TRUSTED)
+    user = _header_value(headers, _HDR_USER)
+    password = _header_value(headers, _HDR_PASSWORD)
+    trusted_raw = _header_value(headers, _HDR_TRUSTED)
     if user:
         creds["user"] = user
     if password:

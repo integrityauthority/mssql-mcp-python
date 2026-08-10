@@ -156,9 +156,25 @@ Input: table="dbo.orders", column="status"
 Output: JSON list of {value, count}, most frequent first (limit capped at 200)
 ```
 
+### 12. `list_databases()`
+List the databases the connected login can access (for cross-database work)
+```
+Input: (none)
+Output: JSON list of {name, database_id, state}
+```
+
+### Multiple databases
+- All discovery tools (`list_schemas`, `list_tables`, `describe_table`,
+  `schema_discovery`, `get_relationships`) and `execute_sql` accept a `database`
+  argument to target a specific database — otherwise they use `DEFAULT_DATABASE`
+  or the login's default. Discover options with `list_databases`.
+- **Cross-database queries work in a single statement** via fully-qualified names
+  (`[OtherDb].schema.table`), including JOINs across databases — no `USE` and no
+  multi-statement needed (multi-statement input is rejected by policy).
+
 The server also sends `instructions` to clients on connect, guiding agents to
-start with discovery (`describe_table`, `get_relationships`, `sample_table`,
-`distinct_values`) before querying.
+discover (`list_databases` → `describe_table` / `get_relationships` / `sample_table`
+/ `distinct_values`) before querying.
 
 ## Security Features
 ✅ **Read-Only by Default**

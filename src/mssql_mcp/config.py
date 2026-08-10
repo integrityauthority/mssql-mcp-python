@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # (ignores user/password); False forces SQL auth; None leaves it untouched.
     MSSQL_TRUSTED_CONNECTION: Optional[bool] = None
 
+    # Optional default database (initial catalog). When set, connections open in
+    # this database instead of the login's default, so unqualified names and the
+    # discovery tools resolve there. Leave unset to use the login's default DB.
+    # Per-call `database` arguments and fully-qualified names still work and win.
+    DEFAULT_DATABASE: Optional[str] = None
+
     # Security & safety
     READ_ONLY: bool = True
     ENABLE_WRITES: bool = False

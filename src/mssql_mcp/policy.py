@@ -178,6 +178,7 @@ def explain_policy() -> dict:
         "max_query_length_chars": settings.MAX_QUERY_LENGTH,
         "allowed_tools": [
             "execute_sql",
+            "list_databases",
             "list_schemas",
             "list_tables",
             "schema_discovery",

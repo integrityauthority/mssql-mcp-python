@@ -102,17 +102,22 @@ _INSTRUCTIONS = """\
 This server exposes a Microsoft SQL Server database.
 
 To find what you need efficiently:
-- Start with discovery: `list_tables` / `list_schemas`, then `describe_table` for a
-  single table's columns, types, keys and descriptions.
-- Use `get_relationships` to learn foreign keys before writing JOINs.
-- Use `sample_table` to see a few example rows, and `distinct_values` to learn the
-  typical values of a column before filtering on it.
-- Run queries with `execute_sql` (use format="json" for machine-readable output;
-  raise `timeout`/`max_rows` for big/slow queries).
+- Discover databases with `list_databases`, then explore any of them: the
+  discovery tools (`list_schemas`, `list_tables`, `describe_table`,
+  `schema_discovery`, `get_relationships`) all take a `database` argument to look
+  inside a specific database, not just the current one.
+- `describe_table` gives a table's columns, types, keys and descriptions;
+  `get_relationships` gives foreign keys (for JOINs); `sample_table` shows example
+  rows; `distinct_values` shows a column's typical values before you filter on it.
+- Run queries with `execute_sql` (use format="json"; raise `timeout`/`max_rows`
+  for big/slow queries; pass `database` to run in a specific database).
 
 Conventions:
-- The default database follows the connected login; for cross-database queries use
-  fully-qualified names: DATABASE.schema.table.
+- The default database follows the connected login (override per call with the
+  `database` argument, or server-wide with DEFAULT_DATABASE).
+- Cross-database queries work in a SINGLE statement via fully-qualified names —
+  DATABASE.schema.table — including JOINs across databases. You do NOT need
+  multiple statements or USE; multi-statement input is rejected.
 - Non-ASCII text (e.g. accented characters) is handled correctly; use N'...' for
   NVARCHAR string literals.
 - Only single statements are allowed; write operations require the server to be
@@ -133,6 +138,7 @@ async def execute_sql(
     format: str = "table",
     timeout: Optional[int] = None,
     max_rows: Optional[int] = None,
+    database: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> str:
     """
@@ -153,6 +159,9 @@ async def execute_sql(
         max_rows: Maximum rows to return for this call. Overrides the server
             default (MAX_ROWS_PER_QUERY). The output flags when results are
             truncated.
+        database: Run in this database (initial catalog) so unqualified names
+            resolve there. Cross-database queries also work without it via
+            fully-qualified names, e.g. [OtherDb].schema.table, including JOINs.
 
     Returns:
         Formatted query results as string, followed by a summary line. For write
@@ -173,7 +182,7 @@ async def execute_sql(
     with MetricsContext(tool_name) as metrics:
         try:
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_query(sql, timeout=timeout, max_rows=max_rows)
+                res = await execute_query(sql, timeout=timeout, max_rows=max_rows, database=database)
             metrics.set_rows(len(res.rows))
 
             # Write statement / no result set: report affected rows.
@@ -203,7 +212,7 @@ async def execute_sql(
 
 
 @mcp.tool()
-async def list_schemas(ctx: Optional[Context] = None) -> str:
+async def list_schemas(database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     List all schemas in the current database.
 
@@ -223,7 +232,7 @@ async def list_schemas(ctx: Optional[Context] = None) -> str:
             ORDER BY name
             """
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql)
+                res = await execute_schema_query(sql, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -239,7 +248,7 @@ async def list_schemas(ctx: Optional[Context] = None) -> str:
 
 
 @mcp.tool()
-async def list_tables(schema: Optional[str] = None, limit: int = 200, ctx: Optional[Context] = None) -> str:
+async def list_tables(schema: Optional[str] = None, limit: int = 200, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     List tables in the database, optionally filtered by schema.
 
@@ -279,7 +288,7 @@ async def list_tables(schema: Optional[str] = None, limit: int = 200, ctx: Optio
             """
 
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql)
+                res = await execute_schema_query(sql, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -295,7 +304,7 @@ async def list_tables(schema: Optional[str] = None, limit: int = 200, ctx: Optio
 
 
 @mcp.tool()
-async def schema_discovery(schema: Optional[str] = None, ctx: Optional[Context] = None) -> str:
+async def schema_discovery(schema: Optional[str] = None, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     Discover schema information: tables, columns, types, and constraints.
 
@@ -339,7 +348,7 @@ async def schema_discovery(schema: Optional[str] = None, ctx: Optional[Context] 
             """
 
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql, timeout=60)
+                res = await execute_schema_query(sql, timeout=60, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -356,7 +365,7 @@ async def schema_discovery(schema: Optional[str] = None, ctx: Optional[Context] 
 
 
 @mcp.tool()
-async def describe_table(table: str, ctx: Optional[Context] = None) -> str:
+async def describe_table(table: str, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     Describe a single table's structure: columns, data types, length,
     nullability, primary-key membership, and column descriptions.
@@ -421,7 +430,7 @@ async def describe_table(table: str, ctx: Optional[Context] = None) -> str:
             ORDER BY s.name, t.name, c.column_id
             """
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql)
+                res = await execute_schema_query(sql, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -516,6 +525,7 @@ async def check_db_connection(ctx: Optional[Context] = None) -> str:
 async def get_relationships(
     table: Optional[str] = None,
     schema: Optional[str] = None,
+    database: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> str:
     """
@@ -562,7 +572,7 @@ async def get_relationships(
             ORDER BY ps.name, pt.name, fk.name, fkc.constraint_column_id
             """
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql)
+                res = await execute_schema_query(sql, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -665,4 +675,38 @@ async def distinct_values(table: str, column: str, limit: int = 20, ctx: Optiona
 
         except Exception as e:
             logger.exception("distinct_values failed")
+            return f"ERROR: {type(e).__name__}: {str(e)}"
+
+
+@mcp.tool()
+async def list_databases(ctx: Optional[Context] = None) -> str:
+    """
+    List the databases the connected login can access.
+
+    Use this to discover which databases exist for cross-database work. Any of
+    them can be targeted via the `database` argument of the discovery tools, or
+    queried directly with fully-qualified names (e.g. [OtherDb].schema.table).
+
+    Returns:
+        JSON list of {name, database_id, state} for accessible databases.
+    """
+    tool_name = "list_databases"
+    from .utils import format_json
+
+    with MetricsContext(tool_name) as metrics:
+        try:
+            sql = (
+                "SELECT name, database_id, state_desc AS state "
+                "FROM sys.databases WHERE HAS_DBACCESS(name) = 1 ORDER BY name"
+            )
+            with request_credentials(**_creds_from_ctx(ctx)):
+                res = await execute_schema_query(sql)
+            metrics.set_rows(len(res.rows))
+
+            if not res.rows:
+                return "No accessible databases found."
+            return format_json(res.columns, res.rows)
+
+        except Exception as e:
+            logger.exception("list_databases failed")
             return f"ERROR: {type(e).__name__}: {str(e)}"

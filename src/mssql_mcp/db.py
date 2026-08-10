@@ -115,24 +115,28 @@ def _quote_odbc_value(value: str) -> str:
     return value
 
 
-def build_connection_string() -> str:
-    """Build the effective connection string, applying optional credential overrides.
+def build_connection_string(database: Optional[str] = None) -> str:
+    """Build the effective connection string, applying optional overrides.
 
     Credentials come from the per-request override if one is bound (see
     request_credentials), otherwise from MSSQL_USER / MSSQL_PASSWORD /
     MSSQL_TRUSTED_CONNECTION. They take precedence over UID/PWD embedded in
-    MSSQL_CONNECTION_STRING, so a deployment (or an individual remote client) can
-    run under its own SQL login without editing the base connection string. Only
-    the credential keys being overridden are replaced; everything else is preserved.
+    MSSQL_CONNECTION_STRING.
+
+    The initial catalog comes from the `database` argument if given, else from
+    DEFAULT_DATABASE; when set it overrides any Database/Initial Catalog in the
+    base string, so unqualified names resolve in that database. Only the keys
+    being overridden are replaced; everything else is preserved.
     """
     base = settings.MSSQL_CONNECTION_STRING
     user, password, trusted = _effective_credentials()
+    db = database or settings.DEFAULT_DATABASE
 
-    # No overrides configured -> use the connection string as-is.
-    if not user and not password and trusted is None:
+    # Nothing to override -> use the connection string as-is.
+    if not user and not password and trusted is None and not db:
         return base
 
-    # Determine which credential keys to drop from the base string.
+    # Determine which keys to drop from the base string.
     drop = set()
     if trusted is True:
         drop |= {"uid", "pwd", "user id", "password", "trusted_connection"}
@@ -142,6 +146,8 @@ def build_connection_string() -> str:
         drop |= {"uid", "user id"}
     if password:
         drop |= {"pwd", "password"}
+    if db:
+        drop |= {"database", "initial catalog"}
 
     kept = []
     for part in base.split(";"):
@@ -159,20 +165,23 @@ def build_connection_string() -> str:
             kept.append(f"UID={_quote_odbc_value(user)}")
         if password:
             kept.append(f"PWD={_quote_odbc_value(password)}")
+    if db:
+        kept.append(f"Database={_quote_odbc_value(db)}")
 
     return ";".join(kept) + ";"
 
 
 @contextmanager
-def get_connection():
+def get_connection(database: Optional[str] = None):
     """
     Context manager for database connections with automatic cleanup.
-    Uses connection pooling for efficiency.
+    Uses connection pooling for efficiency. `database` (or DEFAULT_DATABASE) sets
+    the initial catalog for this connection.
     """
     conn = None
     try:
         conn = pyodbc.connect(
-            build_connection_string(),
+            build_connection_string(database),
             autocommit=False,
             timeout=settings.MSSQL_CONNECTION_TIMEOUT,
         )
@@ -202,6 +211,7 @@ async def execute_query(
     params: Tuple = (),
     timeout: Optional[int] = None,
     max_rows: Optional[int] = None,
+    database: Optional[str] = None,
 ) -> QueryResult:
     """
     Execute a SQL statement asynchronously.
@@ -214,6 +224,8 @@ async def execute_query(
         params: Query parameters (for parameterized queries)
         timeout: Query timeout in seconds (defaults to MSSQL_QUERY_TIMEOUT)
         max_rows: Maximum rows to return (defaults to MAX_ROWS_PER_QUERY)
+        database: Initial catalog for this call (defaults to DEFAULT_DATABASE /
+            the login's default); fully-qualified names still work regardless.
 
     Returns:
         QueryResult with columns, rows, truncated flag and affected rowcount.
@@ -229,7 +241,7 @@ async def execute_query(
 
     def _sync_execute() -> QueryResult:
         """Synchronous query execution in thread."""
-        with get_connection() as conn:
+        with get_connection(database) as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute(sql, params)
@@ -271,14 +283,16 @@ async def execute_query(
         raise DatabaseError(f"Unexpected error: {e}") from e
 
 
-async def execute_schema_query(sql: str, timeout: Optional[int] = None) -> QueryResult:
+async def execute_schema_query(sql: str, timeout: Optional[int] = None,
+                               database: Optional[str] = None) -> QueryResult:
     """
     Execute a schema/metadata query with relaxed row limits.
-    Used for list_tables, list_schemas, schema_discovery.
+    Used for list_tables, list_schemas, schema_discovery. `database` targets a
+    specific catalog (else DEFAULT_DATABASE / the login's default).
     """
     if timeout is None:
         timeout = settings.MSSQL_QUERY_TIMEOUT
-    return await execute_query(sql, timeout=timeout, max_rows=10000)
+    return await execute_query(sql, timeout=timeout, max_rows=10000, database=database)
 
 
 async def get_database_info() -> dict:

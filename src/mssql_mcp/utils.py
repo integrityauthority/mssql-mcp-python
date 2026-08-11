@@ -55,9 +55,29 @@ def format_table(headers: List[str], rows: List[Tuple[Any, ...]]) -> str:
     return "\n".join([header_row, divider] + body)
 
 
+def rows_to_dicts(headers: List[str], rows: List[Tuple[Any, ...]]) -> List[Dict[str, Any]]:
+    """Convert (headers, rows) into a list of JSON-friendly dicts.
+
+    Datetimes are ISO-formatted and binary values shown as "<binary>".
+    """
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        obj: Dict[str, Any] = {}
+        for i, header in enumerate(headers):
+            value = row[i] if i < len(row) else None
+            if isinstance(value, (bytes, bytearray)):
+                obj[header] = "<binary>"
+            elif hasattr(value, "isoformat"):  # datetime
+                obj[header] = value.isoformat()
+            else:
+                obj[header] = value
+        result.append(obj)
+    return result
+
+
 def format_json(headers: List[str], rows: List[Tuple[Any, ...]]) -> str:
     """
-    Format table data as JSON.
+    Format table data as a JSON array of objects.
 
     Args:
         headers: Column names
@@ -66,20 +86,7 @@ def format_json(headers: List[str], rows: List[Tuple[Any, ...]]) -> str:
     Returns:
         JSON string with array of objects
     """
-    result = []
-    for row in rows:
-        obj = {}
-        for i, header in enumerate(headers):
-            value = row[i] if i < len(row) else None
-            # Handle special types
-            if isinstance(value, (bytes, bytearray)):
-                obj[header] = "<binary>"
-            elif hasattr(value, "isoformat"):  # datetime
-                obj[header] = value.isoformat()
-            else:
-                obj[header] = value
-        result.append(obj)
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(rows_to_dicts(headers, rows), indent=2, default=str)
 
 
 def format_csv(headers: List[str], rows: List[Tuple[Any, ...]]) -> str:

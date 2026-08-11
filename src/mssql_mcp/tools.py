@@ -109,8 +109,10 @@ To find what you need efficiently:
 - `describe_table` gives a table's columns, types, keys and descriptions;
   `get_relationships` gives foreign keys (for JOINs); `sample_table` shows example
   rows; `distinct_values` shows a column's typical values before you filter on it.
-- Run queries with `execute_sql` (use format="json"; raise `timeout`/`max_rows`
-  for big/slow queries; pass `database` to run in a specific database).
+- Run queries with `execute_sql`: format="json" gives a valid JSON envelope for
+  reliable field parsing; for large results prefer "table"/"csv" (more compact)
+  and control size with `max_rows`. Raise `timeout` for slow queries; pass
+  `database` to run in a specific database.
 
 Conventions:
 - The default database follows the connected login (override per call with the
@@ -152,7 +154,11 @@ async def execute_sql(
     Args:
         sql: SQL statement to execute.
         format: Output format for result sets - 'table', 'json', or 'csv'
-            (default: 'table'). Use 'json' for the most machine-readable output.
+            (default: 'table'). Use 'json' when you need to parse specific fields
+            reliably (it returns a valid JSON envelope with row_count/truncated).
+            For large result sets 'csv' or 'table' are far more compact than json
+            (json repeats every column name on every row); the real lever for big
+            data is `max_rows`, not the format.
         timeout: Per-query timeout in seconds. Overrides the server default
             (MSSQL_QUERY_TIMEOUT) for this call only — raise it for slow,
             complex queries such as large JOINs or CROSS APPLY.
@@ -164,8 +170,9 @@ async def execute_sql(
             fully-qualified names, e.g. [OtherDb].schema.table, including JOINs.
 
     Returns:
-        Formatted query results as string, followed by a summary line. For write
-        statements, a confirmation with the affected-row count.
+        For 'json': a JSON object {columns, row_count, truncated, rows}. For
+        'table'/'csv': the rendered rows followed by a summary line. For write
+        statements: a confirmation with the affected-row count.
     """
     client_id = "unknown"  # Could be extracted from request context in production
     tool_name = "execute_sql"
@@ -191,16 +198,27 @@ async def execute_sql(
                     return f"OK: {res.rowcount} row(s) affected."
                 return "OK: statement executed (no result set)."
 
-            # Format output
+            # JSON mode returns a single valid JSON document (envelope) with the
+            # metadata inside it — no trailing summary line, so it parses cleanly.
             if format.lower() == "json":
-                result = format_json(res.columns, res.rows)
-            elif format.lower() == "csv":
+                import json as _json
+                from .utils import rows_to_dicts
+                envelope = {
+                    "columns": res.columns,
+                    "row_count": len(res.rows),
+                    "truncated": res.truncated,
+                    "rows": rows_to_dicts(res.columns, res.rows),
+                }
+                return _json.dumps(envelope, indent=2, default=str)
+
+            # Human-readable formats: render, then append a summary line that
+            # flags truncation explicitly so it is never silent.
+            if format.lower() == "csv":
                 from .utils import format_csv
                 result = format_csv(res.columns, res.rows)
             else:  # table (default)
                 result = format_table(res.columns, res.rows)
 
-            # Add summary, flagging truncation explicitly so it is never silent.
             summary = result_summary(res.columns, res.rows)
             if res.truncated:
                 summary += " — TRUNCATED (more rows available; raise max_rows to see them)"

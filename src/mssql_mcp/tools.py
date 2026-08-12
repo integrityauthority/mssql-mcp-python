@@ -97,8 +97,41 @@ def _get_transport_security():
         allowed_origins=allowed_origins,
     )
 
+# Guidance sent to MCP clients on initialize, so agents use the tools effectively.
+_INSTRUCTIONS = """\
+This server exposes a Microsoft SQL Server database.
+
+To find what you need efficiently:
+- Discover databases with `list_databases`, then explore any of them: the
+  discovery tools (`list_schemas`, `list_tables`, `describe_table`,
+  `schema_discovery`, `get_relationships`) all take a `database` argument to look
+  inside a specific database, not just the current one.
+- `describe_table` gives a table's columns, types, keys and descriptions;
+  `get_relationships` gives foreign keys (for JOINs); `sample_table` shows example
+  rows; `distinct_values` shows a column's typical values before you filter on it.
+- Run queries with `execute_sql`: format="json" gives a valid JSON envelope for
+  reliable field parsing; for large results prefer "table"/"csv" (more compact)
+  and control size with `max_rows`. Raise `timeout` for slow queries; pass
+  `database` to run in a specific database.
+
+Conventions:
+- The default database follows the connected login (override per call with the
+  `database` argument, or server-wide with DEFAULT_DATABASE).
+- Cross-database queries work in a SINGLE statement via fully-qualified names —
+  DATABASE.schema.table — including JOINs across databases. You do NOT need
+  multiple statements or USE; multi-statement input is rejected.
+- Non-ASCII text (e.g. accented characters) is handled correctly; use N'...' for
+  NVARCHAR string literals.
+- Only single statements are allowed; write operations require the server to be
+  write-enabled and a login with the right permissions.
+"""
+
 # Create MCP server instance with transport security
-mcp = FastMCP("mssql-mcp", transport_security=_get_transport_security())
+mcp = FastMCP(
+    "mssql-mcp",
+    instructions=_INSTRUCTIONS,
+    transport_security=_get_transport_security(),
+)
 
 
 @mcp.tool()
@@ -107,6 +140,7 @@ async def execute_sql(
     format: str = "table",
     timeout: Optional[int] = None,
     max_rows: Optional[int] = None,
+    database: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> str:
     """
@@ -120,17 +154,25 @@ async def execute_sql(
     Args:
         sql: SQL statement to execute.
         format: Output format for result sets - 'table', 'json', or 'csv'
-            (default: 'table'). Use 'json' for the most machine-readable output.
+            (default: 'table'). Use 'json' when you need to parse specific fields
+            reliably (it returns a valid JSON envelope with row_count/truncated).
+            For large result sets 'csv' or 'table' are far more compact than json
+            (json repeats every column name on every row); the real lever for big
+            data is `max_rows`, not the format.
         timeout: Per-query timeout in seconds. Overrides the server default
             (MSSQL_QUERY_TIMEOUT) for this call only — raise it for slow,
             complex queries such as large JOINs or CROSS APPLY.
         max_rows: Maximum rows to return for this call. Overrides the server
             default (MAX_ROWS_PER_QUERY). The output flags when results are
             truncated.
+        database: Run in this database (initial catalog) so unqualified names
+            resolve there. Cross-database queries also work without it via
+            fully-qualified names, e.g. [OtherDb].schema.table, including JOINs.
 
     Returns:
-        Formatted query results as string, followed by a summary line. For write
-        statements, a confirmation with the affected-row count.
+        For 'json': a JSON object {columns, row_count, truncated, rows}. For
+        'table'/'csv': the rendered rows followed by a summary line. For write
+        statements: a confirmation with the affected-row count.
     """
     client_id = "unknown"  # Could be extracted from request context in production
     tool_name = "execute_sql"
@@ -147,7 +189,7 @@ async def execute_sql(
     with MetricsContext(tool_name) as metrics:
         try:
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_query(sql, timeout=timeout, max_rows=max_rows)
+                res = await execute_query(sql, timeout=timeout, max_rows=max_rows, database=database)
             metrics.set_rows(len(res.rows))
 
             # Write statement / no result set: report affected rows.
@@ -156,16 +198,27 @@ async def execute_sql(
                     return f"OK: {res.rowcount} row(s) affected."
                 return "OK: statement executed (no result set)."
 
-            # Format output
+            # JSON mode returns a single valid JSON document (envelope) with the
+            # metadata inside it — no trailing summary line, so it parses cleanly.
             if format.lower() == "json":
-                result = format_json(res.columns, res.rows)
-            elif format.lower() == "csv":
+                import json as _json
+                from .utils import rows_to_dicts
+                envelope = {
+                    "columns": res.columns,
+                    "row_count": len(res.rows),
+                    "truncated": res.truncated,
+                    "rows": rows_to_dicts(res.columns, res.rows),
+                }
+                return _json.dumps(envelope, indent=2, default=str)
+
+            # Human-readable formats: render, then append a summary line that
+            # flags truncation explicitly so it is never silent.
+            if format.lower() == "csv":
                 from .utils import format_csv
                 result = format_csv(res.columns, res.rows)
             else:  # table (default)
                 result = format_table(res.columns, res.rows)
 
-            # Add summary, flagging truncation explicitly so it is never silent.
             summary = result_summary(res.columns, res.rows)
             if res.truncated:
                 summary += " — TRUNCATED (more rows available; raise max_rows to see them)"
@@ -177,7 +230,7 @@ async def execute_sql(
 
 
 @mcp.tool()
-async def list_schemas(ctx: Optional[Context] = None) -> str:
+async def list_schemas(database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     List all schemas in the current database.
 
@@ -197,7 +250,7 @@ async def list_schemas(ctx: Optional[Context] = None) -> str:
             ORDER BY name
             """
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql)
+                res = await execute_schema_query(sql, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -213,7 +266,7 @@ async def list_schemas(ctx: Optional[Context] = None) -> str:
 
 
 @mcp.tool()
-async def list_tables(schema: Optional[str] = None, limit: int = 200, ctx: Optional[Context] = None) -> str:
+async def list_tables(schema: Optional[str] = None, limit: int = 200, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     List tables in the database, optionally filtered by schema.
 
@@ -253,7 +306,7 @@ async def list_tables(schema: Optional[str] = None, limit: int = 200, ctx: Optio
             """
 
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql)
+                res = await execute_schema_query(sql, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -269,7 +322,7 @@ async def list_tables(schema: Optional[str] = None, limit: int = 200, ctx: Optio
 
 
 @mcp.tool()
-async def schema_discovery(schema: Optional[str] = None, ctx: Optional[Context] = None) -> str:
+async def schema_discovery(schema: Optional[str] = None, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     Discover schema information: tables, columns, types, and constraints.
 
@@ -313,7 +366,7 @@ async def schema_discovery(schema: Optional[str] = None, ctx: Optional[Context] 
             """
 
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql, timeout=60)
+                res = await execute_schema_query(sql, timeout=60, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -330,7 +383,7 @@ async def schema_discovery(schema: Optional[str] = None, ctx: Optional[Context] 
 
 
 @mcp.tool()
-async def describe_table(table: str, ctx: Optional[Context] = None) -> str:
+async def describe_table(table: str, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     Describe a single table's structure: columns, data types, length,
     nullability, primary-key membership, and column descriptions.
@@ -372,7 +425,8 @@ async def describe_table(table: str, ctx: Optional[Context] = None) -> str:
                 c.scale,
                 c.is_nullable,
                 CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS is_primary_key,
-                ep.value AS description
+                CAST(cep.value AS NVARCHAR(MAX)) AS column_description,
+                CAST(tep.value AS NVARCHAR(MAX)) AS table_description
             FROM sys.tables t
             INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
             INNER JOIN sys.columns c ON t.object_id = c.object_id
@@ -384,13 +438,17 @@ async def describe_table(table: str, ctx: Optional[Context] = None) -> str:
                     ON ic.object_id = i.object_id AND ic.index_id = i.index_id
                 WHERE i.is_primary_key = 1
             ) pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id
-            LEFT JOIN sys.extended_properties ep
-                ON ep.major_id = c.object_id AND ep.minor_id = c.column_id
+            LEFT JOIN sys.extended_properties cep
+                ON cep.major_id = c.object_id AND cep.minor_id = c.column_id
+                AND cep.name = 'MS_Description'
+            LEFT JOIN sys.extended_properties tep
+                ON tep.major_id = t.object_id AND tep.minor_id = 0
+                AND tep.name = 'MS_Description'
             WHERE {where}
             ORDER BY s.name, t.name, c.column_id
             """
             with request_credentials(**_creds_from_ctx(ctx)):
-                res = await execute_schema_query(sql)
+                res = await execute_schema_query(sql, database=database)
             metrics.set_rows(len(res.rows))
 
             if not res.rows:
@@ -479,3 +537,194 @@ async def check_db_connection(ctx: Optional[Context] = None) -> str:
         except Exception as e:
             logger.exception("check_db_connection failed")
             return f"ERROR: Database connection check failed - {str(e)}"
+
+
+@mcp.tool()
+async def get_relationships(
+    table: Optional[str] = None,
+    schema: Optional[str] = None,
+    database: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> str:
+    """
+    List foreign-key relationships (parent table.column -> referenced table.column).
+
+    Use this to learn how tables join before writing JOINs. Optionally filter to a
+    single table (matches the FK's parent or referenced side) and/or a schema.
+
+    Returns:
+        JSON list of relationships, or a message if none are found.
+    """
+    tool_name = "get_relationships"
+    from .utils import escape_sql_string, format_json
+
+    with MetricsContext(tool_name) as metrics:
+        try:
+            filters = []
+            if table:
+                t = escape_sql_string(table)
+                filters.append(f"(pt.name = {t} OR rt.name = {t})")
+            if schema:
+                s = escape_sql_string(schema)
+                filters.append(f"(ps.name = {s} OR rs.name = {s})")
+            where = ("WHERE " + " AND ".join(filters)) if filters else ""
+
+            sql = f"""
+            SELECT
+                fk.name AS fk_name,
+                ps.name AS parent_schema,
+                pt.name AS parent_table,
+                pc.name AS parent_column,
+                rs.name AS referenced_schema,
+                rt.name AS referenced_table,
+                rc.name AS referenced_column
+            FROM sys.foreign_keys fk
+            INNER JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+            INNER JOIN sys.tables pt ON pt.object_id = fk.parent_object_id
+            INNER JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+            INNER JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+            INNER JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
+            INNER JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+            INNER JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+            {where}
+            ORDER BY ps.name, pt.name, fk.name, fkc.constraint_column_id
+            """
+            with request_credentials(**_creds_from_ctx(ctx)):
+                res = await execute_schema_query(sql, database=database)
+            metrics.set_rows(len(res.rows))
+
+            if not res.rows:
+                return "No foreign-key relationships found."
+            return format_json(res.columns, res.rows)
+
+        except Exception as e:
+            logger.exception("get_relationships failed")
+            return f"ERROR: {type(e).__name__}: {str(e)}"
+
+
+def _qualified_name(table: str) -> Optional[str]:
+    """Turn 'db.schema.table' / 'schema.table' / 'table' into a safely bracketed name."""
+    from .utils import escape_sql_identifier
+    parts = [p.strip() for p in table.split(".")]
+    if not table.strip() or len(parts) > 3 or any(not p for p in parts):
+        return None
+    return ".".join(escape_sql_identifier(p) for p in parts)
+
+
+@mcp.tool()
+async def sample_table(table: str, limit: int = 5, ctx: Optional[Context] = None) -> str:
+    """
+    Return a few example rows from a table, to understand its data shape and values.
+
+    Args:
+        table: Table name, optionally schema-/database-qualified
+            (e.g. 'dbo.users' or 'MyDb.dbo.users').
+        limit: Number of rows to return (default 5, max 100).
+
+    Returns:
+        JSON rows, or a message if the table is empty.
+    """
+    tool_name = "sample_table"
+    from .utils import format_json
+
+    if limit < 1:
+        return "ERROR: limit must be >= 1"
+    limit = min(limit, 100)
+    qualified = _qualified_name(table)
+    if not qualified:
+        return "ERROR: invalid table name"
+
+    with MetricsContext(tool_name) as metrics:
+        try:
+            sql = f"SELECT TOP {limit} * FROM {qualified}"
+            with request_credentials(**_creds_from_ctx(ctx)):
+                res = await execute_query(sql, max_rows=limit)
+            metrics.set_rows(len(res.rows))
+
+            if not res.rows:
+                return f"No rows in {table}."
+            return format_json(res.columns, res.rows)
+
+        except Exception as e:
+            logger.exception("sample_table failed")
+            return f"ERROR: {type(e).__name__}: {str(e)}"
+
+
+@mcp.tool()
+async def distinct_values(table: str, column: str, limit: int = 20, ctx: Optional[Context] = None) -> str:
+    """
+    Show a column's most frequent distinct values with counts, to learn what to
+    filter on (e.g. the set of status codes or categories in a column).
+
+    Args:
+        table: Table name, optionally schema-/database-qualified.
+        column: Column name.
+        limit: Max distinct values to return (default 20, max 200).
+
+    Returns:
+        JSON list of {value, count}, most frequent first.
+    """
+    tool_name = "distinct_values"
+    from .utils import escape_sql_identifier, format_json
+
+    if limit < 1:
+        return "ERROR: limit must be >= 1"
+    limit = min(limit, 200)
+    qualified = _qualified_name(table)
+    if not qualified:
+        return "ERROR: invalid table name"
+    if not column.strip():
+        return "ERROR: column is required"
+    col = escape_sql_identifier(column.strip())
+
+    with MetricsContext(tool_name) as metrics:
+        try:
+            sql = (
+                f"SELECT TOP {limit} {col} AS value, COUNT(*) AS count "
+                f"FROM {qualified} GROUP BY {col} ORDER BY COUNT(*) DESC"
+            )
+            with request_credentials(**_creds_from_ctx(ctx)):
+                res = await execute_query(sql, max_rows=limit)
+            metrics.set_rows(len(res.rows))
+
+            if not res.rows:
+                return f"No values found for {column} in {table}."
+            return format_json(res.columns, res.rows)
+
+        except Exception as e:
+            logger.exception("distinct_values failed")
+            return f"ERROR: {type(e).__name__}: {str(e)}"
+
+
+@mcp.tool()
+async def list_databases(ctx: Optional[Context] = None) -> str:
+    """
+    List the databases the connected login can access.
+
+    Use this to discover which databases exist for cross-database work. Any of
+    them can be targeted via the `database` argument of the discovery tools, or
+    queried directly with fully-qualified names (e.g. [OtherDb].schema.table).
+
+    Returns:
+        JSON list of {name, database_id, state} for accessible databases.
+    """
+    tool_name = "list_databases"
+    from .utils import format_json
+
+    with MetricsContext(tool_name) as metrics:
+        try:
+            sql = (
+                "SELECT name, database_id, state_desc AS state "
+                "FROM sys.databases WHERE HAS_DBACCESS(name) = 1 ORDER BY name"
+            )
+            with request_credentials(**_creds_from_ctx(ctx)):
+                res = await execute_schema_query(sql)
+            metrics.set_rows(len(res.rows))
+
+            if not res.rows:
+                return "No accessible databases found."
+            return format_json(res.columns, res.rows)
+
+        except Exception as e:
+            logger.exception("list_databases failed")
+            return f"ERROR: {type(e).__name__}: {str(e)}"

@@ -133,6 +133,47 @@ Input: (none)
 Output: Connection status
 ```
 
+### 9. `get_relationships(table, schema)`
+List foreign-key relationships so an agent can build correct JOINs
+```
+Input: table="orders"  (optional; matches parent or referenced side)
+Output: JSON of parent table.column -> referenced table.column
+```
+
+### 10. `sample_table(table, limit=5)`
+Return a few example rows to reveal a table's data shape and typical values
+```
+Input: table="dbo.users", limit=5
+Output: JSON rows (limit capped at 100)
+```
+
+### 11. `distinct_values(table, column, limit=20)`
+Most frequent distinct values of a column, with counts — learn what to filter on
+```
+Input: table="dbo.orders", column="status"
+Output: JSON list of {value, count}, most frequent first (limit capped at 200)
+```
+
+### 12. `list_databases()`
+List the databases the connected login can access (for cross-database work)
+```
+Input: (none)
+Output: JSON list of {name, database_id, state}
+```
+
+### Multiple databases
+- All discovery tools (`list_schemas`, `list_tables`, `describe_table`,
+  `schema_discovery`, `get_relationships`) and `execute_sql` accept a `database`
+  argument to target a specific database — otherwise they use `DEFAULT_DATABASE`
+  or the login's default. Discover options with `list_databases`.
+- **Cross-database queries work in a single statement** via fully-qualified names
+  (`[OtherDb].schema.table`), including JOINs across databases — no `USE` and no
+  multi-statement needed (multi-statement input is rejected by policy).
+
+The server also sends `instructions` to clients on connect, guiding agents to
+discover (`list_databases` → `describe_table` / `get_relationships` / `sample_table`
+/ `distinct_values`) before querying.
+
 ## Security Features
 ✅ **Read-Only by Default**
 - Only SELECT queries allowed unless explicitly enabled

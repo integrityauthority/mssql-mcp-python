@@ -3,6 +3,8 @@ services:
     build: .
     image: mssql-mcp
     container_name: mssql-mcp-server
+    # The image defaults to stdio transport; run HTTP for a networked container.
+    command: ["python", "-m", "mssql_mcp.cli", "--transport", "http", "--bind", "0.0.0.0:8080"]
     ports:
       - "8006:8080"
     env_file:

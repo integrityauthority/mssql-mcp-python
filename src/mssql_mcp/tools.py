@@ -119,10 +119,17 @@ Conventions:
   write-enabled and a login with the right permissions.
 """
 
-_INSTRUCTIONS_FULL = """\
+_INSTRUCTIONS = """\
 This server exposes a Microsoft SQL Server database.
 
-To find what you need efficiently:
+Tool surface (chosen per connection): by default every tool is available. A
+client can request a LEAN surface — only `execute_sql` — by connecting to the MCP
+URL with a `?mode=lean` query parameter (e.g. .../mcp?mode=lean). In lean mode,
+read the pinned resource `schema://digest` for the accessible tables and columns
+and do any further discovery with plain SQL via `execute_sql`; this cuts the
+per-turn tool-schema tokens. (`?mode=full` forces the full surface.)
+
+Full surface — to find what you need efficiently:
 - Discover databases with `list_databases`, then explore any of them: the
   discovery tools (`list_schemas`, `list_tables`, `describe_table`,
   `schema_discovery`, `get_relationships`) all take a `database` argument to look
@@ -134,37 +141,44 @@ To find what you need efficiently:
 
 """ + _CONVENTIONS
 
-_INSTRUCTIONS_LEAN = """\
-This server exposes a Microsoft SQL Server database through a single tool,
-`execute_sql`. There are no separate discovery tools: read the pinned resource
-`schema://digest` for the accessible tables and columns, and do any further
-discovery with plain SQL via `execute_sql` (e.g. SELECT over INFORMATION_SCHEMA
-or sys catalog views).
+# Tools advertised in the lean surface (?mode=lean). All tools stay registered and
+# callable; lean only filters what `list_tools` advertises, to cut context tokens.
+LEAN_TOOL_NAMES = {"execute_sql"}
 
-""" + _CONVENTIONS
 
-_INSTRUCTIONS = _INSTRUCTIONS_LEAN if settings.LEAN_TOOLS else _INSTRUCTIONS_FULL
+class ModeFastMCP(FastMCP):
+    """FastMCP that presents a lean or full tool surface per connection.
+
+    The surface is chosen by the connection's `?mode=` query parameter
+    (`lean` → only LEAN_TOOL_NAMES, `full` → everything), falling back to the
+    LEAN_TOOLS setting when no parameter is given. The MCP SDK attaches the
+    Starlette request to each JSON-RPC message, so the query parameter is readable
+    here for streamable-HTTP connections; stdio connections use the default.
+    """
+
+    def _connection_is_lean(self) -> bool:
+        try:
+            request = self._mcp_server.request_context.request
+            mode = request.query_params.get("mode")
+        except Exception:
+            mode = None
+        if mode:
+            return mode.strip().lower() == "lean"
+        return settings.LEAN_TOOLS
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        if self._connection_is_lean():
+            tools = [t for t in tools if t.name in LEAN_TOOL_NAMES]
+        return tools
+
 
 # Create MCP server instance with transport security
-mcp = FastMCP(
+mcp = ModeFastMCP(
     "mssql-mcp",
     instructions=_INSTRUCTIONS,
     transport_security=_get_transport_security(),
 )
-
-
-def tool_full(*d_args, **d_kwargs):
-    """Register a tool only in the full surface; a no-op in LEAN_TOOLS mode.
-
-    In lean mode the decorated function stays defined (still importable/testable)
-    but is NOT registered with the MCP server, so its schema does not consume the
-    agent's per-turn context. `execute_sql` is always registered.
-    """
-    def deco(fn):
-        if settings.LEAN_TOOLS:
-            return fn
-        return mcp.tool(*d_args, **d_kwargs)(fn)
-    return deco
 
 
 @mcp.tool()
@@ -323,7 +337,7 @@ async def schema_digest() -> str:
     return "\n".join(lines)
 
 
-@tool_full()
+@mcp.tool()
 async def list_schemas(database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     List all schemas in the current database.
@@ -359,7 +373,7 @@ async def list_schemas(database: Optional[str] = None, ctx: Optional[Context] = 
             return f"ERROR: {type(e).__name__}: {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def list_tables(schema: Optional[str] = None, limit: int = 200, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     List tables in the database, optionally filtered by schema.
@@ -415,7 +429,7 @@ async def list_tables(schema: Optional[str] = None, limit: int = 200, database: 
             return f"ERROR: {type(e).__name__}: {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def schema_discovery(schema: Optional[str] = None, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     Discover schema information: tables, columns, types, and constraints.
@@ -476,7 +490,7 @@ async def schema_discovery(schema: Optional[str] = None, database: Optional[str]
             return f"ERROR: {type(e).__name__}: {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def describe_table(table: str, database: Optional[str] = None, ctx: Optional[Context] = None) -> str:
     """
     Describe a single table's structure: columns, data types, length,
@@ -555,7 +569,7 @@ async def describe_table(table: str, database: Optional[str] = None, ctx: Option
             return f"ERROR: {type(e).__name__}: {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def get_database_info(ctx: Optional[Context] = None) -> str:
     """
     Get general information about the database and server.
@@ -584,7 +598,7 @@ async def get_database_info(ctx: Optional[Context] = None) -> str:
             return f"ERROR: {type(e).__name__}: {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def get_policy_info() -> str:
     """
     Get current policy and safety settings.
@@ -607,7 +621,7 @@ async def get_policy_info() -> str:
             return f"ERROR: {type(e).__name__}: {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def check_db_connection(ctx: Optional[Context] = None) -> str:
     """
     Check if the database connection is active and healthy.
@@ -633,7 +647,7 @@ async def check_db_connection(ctx: Optional[Context] = None) -> str:
             return f"ERROR: Database connection check failed - {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def get_relationships(
     table: Optional[str] = None,
     schema: Optional[str] = None,
@@ -705,7 +719,7 @@ def _qualified_name(table: str) -> Optional[str]:
     return ".".join(escape_sql_identifier(p) for p in parts)
 
 
-@tool_full()
+@mcp.tool()
 async def sample_table(table: str, limit: int = 5, ctx: Optional[Context] = None) -> str:
     """
     Return a few example rows from a table, to understand its data shape and values.
@@ -744,7 +758,7 @@ async def sample_table(table: str, limit: int = 5, ctx: Optional[Context] = None
             return f"ERROR: {type(e).__name__}: {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def distinct_values(table: str, column: str, limit: int = 20, ctx: Optional[Context] = None) -> str:
     """
     Show a column's most frequent distinct values with counts, to learn what to
@@ -790,7 +804,7 @@ async def distinct_values(table: str, column: str, limit: int = 20, ctx: Optiona
             return f"ERROR: {type(e).__name__}: {str(e)}"
 
 
-@tool_full()
+@mcp.tool()
 async def list_databases(ctx: Optional[Context] = None) -> str:
     """
     List the databases the connected login can access.

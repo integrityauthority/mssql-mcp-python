@@ -186,15 +186,27 @@ digest of the accessible tables and columns. A client can "pin" it so the agent
 knows the schema without spending tool calls to rediscover it; query the data
 itself with `execute_sql`. Available in both tool surfaces below.
 
-### Lean tool surface (`LEAN_TOOLS`) — token efficiency
-Set `LEAN_TOOLS=true` to register **only `execute_sql`** (plus the
-`schema://digest` resource) instead of the full 12-tool set. The discovery tools
-are all expressible as `execute_sql` SELECTs, so a lean agent reads the pinned
-digest for schema and drives everything through one tool — cutting the per-turn
-tool-schema tokens the model pays. Default is `false` (full, convenient set).
-Both surfaces hit the same endpoint, so you can run one instance each and compare
-token usage / tool calls on the same tasks. The current mode shows in `/info`
-(`"lean_tools"`).
+### Lean tool surface (`?mode=lean`) — token efficiency
+A **lean** surface exposes only `execute_sql` (plus the `schema://digest`
+resource) instead of the full 12-tool set. The discovery tools are all
+expressible as `execute_sql` SELECTs, so a lean agent reads the pinned digest for
+schema and drives everything through one tool — cutting the per-turn tool-schema
+tokens the model pays.
+
+The surface is chosen **per connection, on one endpoint**, via a query parameter
+on the MCP URL — no separate container or port:
+```jsonc
+// full (default)
+{ "mcpServers": { "mssql":      { "url": "http://host:8006/mcp" } } }
+// lean
+{ "mcpServers": { "mssql-lean": { "url": "http://host:8006/mcp?mode=lean" } } }
+```
+`?mode=full` forces the full surface. With no parameter, the `LEAN_TOOLS` setting
+(default `false`) decides — so `LEAN_TOOLS=true` makes lean the default while
+`?mode=full` can still opt back in. Because both surfaces share one endpoint, you
+can point one client at `/mcp` and another at `/mcp?mode=lean` and compare token
+usage / tool calls on the same tasks. `/info` shows the default (`"lean_tools"`).
+All tools stay callable in both surfaces; lean only filters what is advertised.
 
 The server also sends `instructions` to clients on connect, guiding agents to
 discover (`list_databases` → `describe_table` / `get_relationships` / `sample_table`

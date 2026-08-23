@@ -79,11 +79,15 @@ curl http://localhost:8080/metrics
 ## Available MCP Tools
 The server exposes these tools to MCP clients:
 
-### 1. `execute_sql(sql, format="table", timeout=None, max_rows=None)`
+### 1. `execute_sql(sql, format="table", timeout=None, max_rows=None, database=None, offset=0)`
 Execute SELECT queries (or write operations if enabled).
-- `format`: `"table"`, `"json"` or `"csv"`.
+- `format`: `"table"`, `"json"` or `"csv"`. For large result sets `csv`/`table`
+  are far more compact than `json` (which repeats column names per row).
 - `timeout`: per-query timeout (seconds), overrides `MSSQL_QUERY_TIMEOUT` for slow queries.
-- `max_rows`: per-query row cap, overrides `MAX_ROWS_PER_QUERY`.
+- `max_rows`: per-query row cap. A caller may lower it; it is **clamped down** to
+  the server hard cap `MAX_ROWS_PER_QUERY` (never raised above it).
+- `offset`: skip this many leading rows (server-side pagination). Combine with
+  `max_rows` to page; add an `ORDER BY` for stable paging.
 ```
 Input: "SELECT TOP 10 * FROM users", format="json"
 Output: JSON rows + summary; truncation is flagged explicitly.
@@ -175,6 +179,22 @@ Output: JSON list of {name, database_id, state}
 - **Cross-database queries work in a single statement** via fully-qualified names
   (`[OtherDb].schema.table`), including JOINs across databases — no `USE` and no
   multi-statement needed (multi-statement input is rejected by policy).
+
+### Schema digest resource (`schema://digest`)
+A read-only MCP **resource** (not a tool) giving a compact one-line-per-table
+digest of the accessible tables and columns. A client can "pin" it so the agent
+knows the schema without spending tool calls to rediscover it; query the data
+itself with `execute_sql`. Available in both tool surfaces below.
+
+### Lean tool surface (`LEAN_TOOLS`) — token efficiency
+Set `LEAN_TOOLS=true` to register **only `execute_sql`** (plus the
+`schema://digest` resource) instead of the full 12-tool set. The discovery tools
+are all expressible as `execute_sql` SELECTs, so a lean agent reads the pinned
+digest for schema and drives everything through one tool — cutting the per-turn
+tool-schema tokens the model pays. Default is `false` (full, convenient set).
+Both surfaces hit the same endpoint, so you can run one instance each and compare
+token usage / tool calls on the same tasks. The current mode shows in `/info`
+(`"lean_tools"`).
 
 The server also sends `instructions` to clients on connect, guiding agents to
 discover (`list_databases` → `describe_table` / `get_relationships` / `sample_table`

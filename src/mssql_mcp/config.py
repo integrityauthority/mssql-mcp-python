@@ -15,8 +15,11 @@ class Settings(BaseSettings):
 
     # Database connection
     MSSQL_CONNECTION_STRING: str
-    MSSQL_CONNECTION_TIMEOUT: int = 30  # seconds
-    MSSQL_QUERY_TIMEOUT: int = 30  # seconds
+    MSSQL_CONNECTION_TIMEOUT: int = 30  # seconds (time to establish a connection)
+    # Default per-query timeout. Analytical sweeps over large tables routinely run
+    # several minutes, so the default is generous; the per-call `timeout` argument
+    # of execute_sql still overrides it (up or down) for a single query.
+    MSSQL_QUERY_TIMEOUT: int = 300  # seconds
     MSSQL_MAX_POOL_SIZE: int = 10
 
     # Character encoding for pyodbc (fixes garbled non-ASCII, e.g. accented text).
